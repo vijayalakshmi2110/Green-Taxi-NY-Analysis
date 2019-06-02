@@ -1,0 +1,504 @@
+---
+title: "NYC Green Taxis Analysis_C230522"
+output: html_notebook
+---
+
+
+Calling the required libraries  
+```{r}
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+library(randomForest)
+library(mltools)
+```
+
+Import the data set
+```{r}
+###### Read the data set #####
+data <- fread("green_tripdata_2015-09.csv", stringsAsFactors = F)
+head(data)
+```
+Dimension of data set
+```{r}
+dim(data)
+```
+Summary statistics of the data set
+```{r}
+summary(data)
+```
+To check if there any null values:
+Ehail the whole column has null value, so dropping that column
+Trip_Type has 4 missing values, so replacing the nas with the most frequent value
+```{r}
+summary(is.na(data))
+```
+```{r}
+data$Ehail_fee<-NULL
+a<-data.frame(table(data$Trip_type))
+data$Trip_type[which(is.na(data$Trip_type)==T)] <- a$Var1[which.max(a$Freq)]
+summary(is.na(data$Trip_type))
+```
+
+Frequency of Distance Travelled seems to be Rightly skewed
+```{r}
+his<-ggplot(data, aes(x=Trip_distance)) + 
+  geom_histogram(color="black", fill="red", bins=100 ) + labs("Histogram of Trip duration") +
+  ylab("Frequency") + xlab("Total Distance")
+his
+```
+Checking the frequency of Trip distance for distance < 20  seems better than the previous histogram indicating that there are outlier values
+```{r}
+his<-ggplot(data[data$Trip_distance<200,], aes(x=Trip_distance)) + 
+  geom_histogram(color="black", fill="red",bins=100 ) + labs("Histogram of Trip duration") +
+  ylab("Frequency") + xlab("Total Distance")
+his
+```
+
+Histogram after taking log of Trip Distance since the data is skewed
+```{r}
+his<-ggplot(data, aes(x=log(Trip_distance))) + 
+  geom_histogram(color="black", fill="red" ) + labs("Histogram of Trip duration") +
+  ylab("Frequency") + xlab("Total Distance")
+his
+```
+```{r}
+box<- ggplot(data, aes(x="",y=Trip_distance)) + 
+  geom_boxplot(outlier.colour="red", outlier.shape=5)
+box
+```
+Summary of Trip Distance suggests that even though the mean is just 2.968, there is some outlier which makes the max value very high.
+```{r}
+summary(data$Trip_distance)
+```
+Creating useful variables by extrcting the hour of day, week,month and weekday
+```{r}
+data[,pickup_hour:=hour(lpep_pickup_datetime)]
+data[,pickup_week := week(lpep_pickup_datetime)]
+data[,pickup_month := month(lpep_pickup_datetime)]
+
+data[,pickup_weekdays := weekdays(as.POSIXct(data$lpep_pickup_datetime,abbreviate=F))]
+
+data[,pickup_datetime:=as.Date(lpep_pickup_datetime)]
+data[,dropoff_datetime:=as.Date(Lpep_dropoff_datetime)]
+data[,time_diff:= (as.POSIXct(Lpep_dropoff_datetime)-as.POSIXct(lpep_pickup_datetime))/60]
+
+```
+
+Mean and Median of Trip Distance across hours of the day
+Both the mean and median of the trip duration is at its peak in the morning 5 to 6 and is lesser during the day
+
+```{r}
+stat_duration <-data[,list(mean_trip=mean(Trip_distance),
+                           median_trip=median(Trip_distance)), by=list(pickup_hour)]
+
+mean_trip_plot <- ggplot(stat_duration,aes(x = as.factor(pickup_hour), y = mean_trip)) +
+  geom_bar(stat = 'identity', fill = 'red') +
+  labs(x = 'Hours', y = 'Mean Trip Duration', title = 'Mean Trip duration by hour of the day') 
+
+median_trip_plot <-ggplot(stat_duration,aes(x = as.factor(pickup_hour), y = median_trip)) +
+  geom_bar(stat = 'identity', fill = 'red') +
+  labs(x = 'Hours', y = 'Median Trip Duration', title = 'Median Trip duration by hour of the day')
+
+
+grid.arrange(mean_trip_plot, median_trip_plot, nrow=2)
+```
+
+Subsetting the data for airport using RateCode. RateCode =2 is JFK, Ratecode =3 is Newark
+
+```{r}
+airport <- subset(data,data$RateCodeID == 2 | data$RateCodeID ==3)
+
+air <- airport[,list(number= length(VendorID), Average_Fare = mean(Fare_amount), 
+                     average_passengers = mean(Passenger_count)),
+               by =list(RateCodeID)]
+
+```
+
+The trip distance to or fro the airports are mostly more than other trips throughout the day except for 11:00 PM to 1:00 AM where the trip duration is more for the non airport regions. This is inspite of the fact the the number of non-airport rides is much higher than the airpoirt rides
+
+```{r}
+temp<-data
+
+
+temp[,air_flag:=ifelse(RateCodeID==2 | RateCodeID ==3,'Airport','Non Airport')]
+
+air_noair <-temp[,list(avg=mean(time_diff)),by=list(air_flag,pickup_hour)]%>%
+  ggplot(aes(x = (pickup_hour), y = avg, fill=air_flag)) +
+  geom_bar(stat = 'identity', position=position_dodge(), color = "black") + 
+  labs(x = 'Hours', y = 'Mean Trip Duration ', title = 'Mean Trip duration by hour of the day for airports vs non airport rides')
+
+
+air_noair1 <-temp[,list(count=length(time_diff)),by=list(air_flag,pickup_hour)]%>%
+  ggplot(aes(x = (pickup_hour), y = count, fill=air_flag)) +
+  geom_bar(stat = 'identity', position=position_dodge(), color = "black") + 
+  labs(x = 'Hours', y = 'Number of trips ', title = 'Number of trips by our of the day  for airports vs non airport rides')
+grid.arrange(air_noair1, air_noair, nrow=2)
+
+```
+
+Even though airport rides make up to only 0.37% of total rides, the fare from airport rides is about 1.41%. The average cost per ride for airports is $57.20 while for Non-Airport rides is $14.87
+
+```{r}
+comp<-temp[,list(No_of_ride=length(Total_amount),Total_Fare=sum(Total_amount),Total_Tip=sum(Tip_amount)),by=list(air_flag)]
+comp<- mutate(comp, No_of_ride_percent = No_of_ride / sum(No_of_ride), Total_Fare_percent= Total_Fare/sum(Total_Fare), avg_cost_per_ride = Total_Fare/No_of_ride)
+comp
+```
+
+Mean trip Duration for both the airports together
+
+```{r}
+both_airport <-airport[,list(avg=mean(time_diff)),by=list(pickup_hour)]%>%
+  ggplot(aes(x = (pickup_hour), y = avg), group =1) +
+  geom_bar(stat = 'identity', fill = 'green') + geom_line(colour = 'red') + 
+  geom_point(colour='red')+
+  labs(x = 'Hours', y = 'Mean Trip Duration ', title = 'Mean Trip duration by hour of the day for both the airports')
+both_airport
+
+```
+
+The mean trip duration for Newark is highest from 2:00 AM to 4L00 AM while for JFK , the trip duration is high almost throughout the day
+
+```{r}
+jfk<- airport[,list(avg=mean(time_diff[RateCodeID==2])),by=list(pickup_hour)]%>%
+  ggplot(aes(x = (pickup_hour), y = avg), group =1) +
+  geom_bar(stat = 'identity', fill = 'green') + geom_line(colour = 'red') + 
+  geom_point(colour='red')+
+  labs(x = 'Hours', y = 'Mean Trip Duration', title = 'Mean Trip duration by hour of the day for JFK')
+
+new <-airport[,list(avg=mean(time_diff[RateCodeID==3])),by=list(pickup_hour)]%>%
+  ggplot(aes(x = (pickup_hour), y = avg), group=1) +
+  geom_bar(stat = 'identity', fill = 'green') + geom_line(colour = 'red') + 
+  geom_point(colour='red')+
+  labs(x = 'Hours', y = 'Mean Trip Duration', title = 'Mean Trip duration by hour of the day for Newark')
+grid.arrange(jfk, new, nrow=2)
+
+
+```
+
+The number of passengers for JFK keeps on increasing till 3:00 PM and starts declining showing that more flights from JFK depart during the day.
+This trend is simillar for Newark
+
+```{r}
+jfk<- airport[,list(avg=sum(Passenger_count[RateCodeID==2])),by=list(pickup_hour)]%>%
+  ggplot(aes(x = (pickup_hour), y = avg), group =1) +
+  geom_bar(stat = 'identity', fill = 'green') + geom_line(colour = 'red') + 
+  geom_point(colour='red')+
+  labs(x = 'Hours', y = 'Total Passenger Count', title = 'Total Passenger Count by hour of the day for JFK')
+
+new <-airport[,list(avg=sum(Passenger_count[RateCodeID==3])),by=list(pickup_hour)]%>%
+  ggplot(aes(x = (pickup_hour), y = avg), group=1) +
+  geom_bar(stat = 'identity', fill = 'green') + geom_line(colour = 'red') + 
+  geom_point(colour='red')+
+  labs(x = 'Hours', y = 'Total Passenger Count', title = 'Total Passenger Count by hour of the day for Newark')
+grid.arrange(jfk, new, nrow=2)
+
+```
+
+More number of passenegers travel to or fro JFK during Friday. While for Newark, most of the rides are on Sunday and Tuesday.
+This might suggest that people use JFK for more of holiday travels and Newark for short business trips
+
+
+```{r}
+jfk<- airport[,list(avg=sum(Passenger_count[RateCodeID==2])),by=list(pickup_weekdays)]%>%
+  ggplot(aes(x = factor(pickup_weekdays,levels = c("Friday", "Saturday", "Sunday", "Monday","Tuesday","Wednesday","Thursday")), y = avg)) +
+  geom_bar(stat = 'identity', fill = 'green')+
+  labs(x = 'weeks', y = 'Total Passengers', title = 'Total Passenger Count by week of the day for JFK')
+
+
+
+new<- airport[,list(avg=sum(Passenger_count[RateCodeID==3])),by=list(pickup_weekdays)]%>%
+  ggplot(aes(x = factor(pickup_weekdays,levels = c("Friday", "Saturday", "Sunday", "Monday","Tuesday","Wednesday","Thursday")), y = avg)) +
+  geom_bar(stat = 'identity', fill = 'green')+
+  labs(x = 'weeks', y = 'Total Passengers', title = 'Total Passenger Count by week of the day for Newark')
+
+
+grid.arrange(jfk, new, nrow=2)
+
+```
+
+Even though the number of rides to JFK is more, but the average fare per ride is more for Newark
+
+```{r}
+airport[,air_flag:= ifelse(RateCodeID ==2,'JFK','Newark')]
+comp<-airport[,list(No_of_ride=length(Total_amount),Total_Fare=sum(Total_amount),Total_Tip=sum(Tip_amount)),by=list(air_flag)]
+comp<- mutate(comp, No_of_ride_percent = No_of_ride / sum(No_of_ride), Total_Fare_percent= Total_Fare/sum(Total_Fare), avg_cost_per_ride = Total_Fare/No_of_ride)
+comp
+```
+```{r}
+data[,tip_per:=Tip_amount/Total_amount]
+### to cinvert into hour
+data[,time_diff:=time_diff/ (60)]
+
+```
+
+```{r}
+data_temp1<- subset(data,is.na(data$tip_per) ==F)
+  
+```
+
+Dropping the unwanted columns
+
+```{r}
+data_temp1$lpep_pickup_datetime<- NULL
+data_temp1$Lpep_dropoff_datetime<-NULL
+data_temp1$VendorID<-NULL
+data_temp1$Store_and_fwd_flag<-NULL
+data_temp1$Tip_amount<-NULL
+data_temp1$pickup_week<-NULL
+data_temp1$pickup_month<-NULL
+data_temp1$pickup_datetime<-NULL
+data_temp1$dropoff_datetime<-NULL
+data_temp1$Pickup_longitude<- NULL
+data_temp1$Pickup_latitude<-NULL
+data_temp1$Dropoff_latitude<-NULL
+data_temp1$Dropoff_longitude<-NULL
+
+```
+
+Converting the categorical columns into factors
+
+```{r}
+data_temp1$RateCodeID<- factor(data_temp1$RateCodeID)
+data_temp1$pickup_hour<- factor(data_temp1$pickup_hour)
+data_temp1$Payment_type<- factor(data_temp1$Payment_type)
+data_temp1$Trip_type<- factor(data_temp1$Trip_type)
+data_temp1$pickup_weekdays<- factor(data_temp1$pickup_weekdays)
+
+```
+
+Creating one hot vector for categorical columns and dropping the base column
+
+```{r}
+data_temp1<-one_hot(data_temp1,dropCols = TRUE)
+data_temp1$RateCodeID_1<-NULL
+data_temp1$pickup_hour_0<-NULL
+data_temp1$Payment_type_1<-NULL
+data_temp1$Trip_type_1<-NULL
+data_temp1$pickup_weekdays_Friday<-NULL
+```
+
+Dividing the data into train and test 70:30
+Ran Regression model
+The adjusted R square being 78.55%.
+Most of the variables are significant. 
+But Trip_type is not significant at all.
+So removing this variable to re-run the model.
+
+```{r}
+smp_size <- floor(0.7 * nrow(data_temp1))
+set.seed(2018)
+train_ind <- sample(seq_len(nrow(data_temp1)), size = smp_size)
+
+train <- data_temp1[train_ind, ]
+test <- data_temp1[-train_ind, ]
+
+
+fit = lm(tip_per ~., train )
+summary(fit)
+
+```
+
+Removing Trip_type2 and rerunning the model.
+The adjusted R square being 78.55%.
+Hence, 78.55% variation in tip_per is due to variation in RateCodeID,Passenger_Count, Trip_Distance,Fare_Amount, Extra,MTA_Tax, Tolls_Amount,improvement_surcharge , Payment_type,Total_Amount,Pickup_hour,Pickup_weekday, time_diff
+Most of the variables are signifiacnt as well
+
+
+```{r}
+data_temp1$Trip_type_2<-NULL
+smp_size <- floor(0.7 * nrow(data_temp1))
+set.seed(2018)
+train_ind <- sample(seq_len(nrow(data_temp1)), size = smp_size)
+
+train <- data_temp1[train_ind, ]
+test <- data_temp1[-train_ind, ]
+
+
+fit = lm(tip_per ~., train )
+summary(fit)
+
+```
+
+Predicting for test, the MSE =0.1677%
+This is a good model
+
+```{r}
+test1<- test
+test1$tip_per<-NULL
+pred <- predict.lm(fit,test1)
+
+(mean((test$tip_per - pred)^2)*100)
+```
+
+Taking a sample of 10000 since my computer is unable to process random forest regressors with the full data
+
+```{r}
+temp <- sample_n(data, 10000)
+temp$Pickup_longitude<-NULL
+temp$Pickup_latitude<-NULL
+temp$Dropoff_longitude<-NULL
+temp$Dropoff_latitude<-NULL
+temp$lpep_pickup_datetime<-NULL
+temp$Lpep_dropoff_datetime <-NULL
+temp$Tip_amount <-NULL
+data_temp1<- subset(temp,is.na(temp$tip_per) ==F)
+
+```
+
+Converting the characters to factors
+
+```{r}
+data_temp1<- data_temp1%>% mutate_if(is.character, as.factor)
+```
+
+Getting train and test data
+
+```{r}
+smp_size <- floor(0.7 * nrow(data_temp1))
+
+set.seed(2018)
+train_ind <- sample(seq_len(nrow(data_temp1)), size = smp_size)
+
+train <- data_temp1[train_ind, ]
+test <- data_temp1[-train_ind, ]
+
+
+```
+
+Running the random forest 
+The MSE is 0.110%
+The % of variance in tip_per explained by the variables is 87.03% which is more than the regression shown above
+
+```{r}
+model <- randomForest(tip_per~.,data=train, importance=T)
+model
+```
+
+This shows which variables are important: Trip_Distance, Time_diff, Fare_amount, Total_amount, Payment_type
+
+```{r}
+# Variable Importance Plot
+varImpPlot(model,
+           sort = T,
+           main="Variable Importance",
+           n.var=10)
+```
+
+Predicting the test data, the MSE is 0.1237%
+
+```{r}
+test1<- test
+test1$tip_per<-NULL
+
+pred <- predict(model,test1)
+
+
+(mean((test$tip_per - pred)^2))*100
+```
+
+Conclusion for prediction of tip_per:
+The random forests can be run for the full data. Based in my analysis here
+Regression- Variation Explained: 78.55%, MSE: 0.1677%
+Random Forest- Variation Explained: 87.03%, MSE: 0.1237%
+
+Hence, Random Forest is a better model
+
+
+
+Variable for Average Speed column
+
+```{r}
+data[,time_diff:=as.numeric(time_diff)]
+data[,avg_speed:=(Trip_distance/time_diff)]
+```
+
+Weekly avearge speed acoss the weeks of September shows that the average speed is highest on week number 39
+
+```{r}
+ano_data<- data[,c('avg_speed','pickup_week')]
+ano_data<- subset(ano_data,abs(ano_data$avg_speed)!=Inf)
+ano_av<- ano_data[,list(avg=mean(avg_speed)), by=list(pickup_week)]
+ggplot(ano_av, aes(x = pickup_week, y = avg)) +
+  geom_bar( stat = "identity", aes(fill = factor(pickup_week))) +
+  labs(title =" Weekly Average Speed in September 2015", 
+       x = "Week Number of the year 2015",
+       y = "Weekly Average Speed") +
+  scale_fill_discrete(name = "Week number")
+
+```
+
+Anova test to check if the average speed is same through the weeks of september.
+Null hypothesis: states that all the average speeds across the weeks are equal
+Alternative hypothesis : Atleast one or all the average speeds across the weeks are unqueal
+Since the p value 0.00111 < 0.05 , we reject the Null Hypothesis. 
+Hence, the average speeds across the weeks are uneuqal
+
+```{r}
+
+ano <- aov(avg_speed~as.factor(pickup_week), data = ano_data)
+summary(ano)
+```
+
+To check the pairwise difference in mean. looking at the p value suggests that the pairs 39-38 and 39-37 show statistical difference in mean since their p value < 0.05
+
+```{r}
+tuk <-TukeyHSD(ano)
+tuk
+plot(tuk)
+```
+
+
+```{r}
+box <- ggplot(ano_data,aes(x=factor(pickup_week), y=avg_speed)) + 
+  geom_boxplot(outlier.colour="red", outlier.shape=5) +   labs(x = "Week Number of the year 2015",
+               y = "Average Speed")
+
+box  
+```
+
+Anova test to check if the average speed is same through the hours of the day.
+Null hypothesis: states that all the average speeds through the hours of the day are equal
+Alternative hypothesis : Atleast one or all the average speeds across the hours of the are unqueal
+Since the p value <2e-16 < 0.05 , we reject the Null Hypothesis. 
+Hence, the average speeds across the hours are uneuqal
+
+```{r}
+ano_data<- data[,c('avg_speed','pickup_hour')]
+ano_data<- subset(ano_data,ano_data$avg_speed!=Inf)
+ano <- aov(avg_speed~as.factor(pickup_hour), data = ano_data)
+summary(ano)
+```
+
+To check the pairwise difference in mean. looking at the p value suggests there are many pairs such as 5-1 , 16-2 etc. show statistical difference in mean since their p value < 0.05
+
+```{r}
+tuk <-TukeyHSD(ano)
+tuk
+plot(tuk)
+```
+
+The avearge hourly speed is maximum at 05:00 AM and declines as the day progresses and again increases in the evening after 6:00 PM
+
+```{r}
+ano_av<- ano_data[,list(avg=mean(avg_speed)), by=list(pickup_hour)]
+
+ggplot(ano_av, aes(x = pickup_hour, y = avg)) +
+  geom_bar( stat = "identity", aes(fill = factor(pickup_hour))) +
+  labs(title ="Hourly Average Speed in September 2015", 
+       x = "Hour of the day",
+       y = "Hourly Average Speed") +
+  scale_fill_discrete(name = "Hour")
+```
+
+```{r}
+
+box <- ggplot(ano_data,aes(x=factor(pickup_hour), y=avg_speed)) + 
+  geom_boxplot(outlier.colour="red", outlier.shape=5) +   labs(x = "Hour of the day",
+                                                               y = "Average Speed")
+
+box               
+
+```
+
